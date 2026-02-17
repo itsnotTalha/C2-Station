@@ -5,6 +5,10 @@ from controller_store import ControllerStore
 from joy_manager import JoyManager
 from ros_manager import RosManager
 
+
+AUTO_REFRESH_DELAY = 1.0
+
+
 HARDWARE_BUTTONS_AVAILABLE = False
 chan = None
 BUTTON_MAP = {
@@ -128,8 +132,11 @@ class ControllerUI:
     def draw(self, stdscr):
         # 1. Logic / Sync
         self.refresh_controllers()
-        d_ros_active = self.ros_manager.get_topic_status("/buswala")
-        a_ros_active = self.ros_manager.get_topic_status("/aram")
+        assignments = ControllerStore.load_assignments()
+        d_data = assignments.get("drive", {})
+        a_data = assignments.get("arm", {})
+        d_ros_active = d_data.get("ros", False) if isinstance(d_data, dict) else False
+        a_ros_active = a_data.get("ros", False) if isinstance(a_data, dict) else False
 
         # 2. Render
         stdscr.erase()
@@ -174,17 +181,9 @@ class ControllerUI:
 
         # MENU
         y = 13
-        assignments = ControllerStore.load_assignments()
-        d_intent = False
-        a_intent = False
-        d_data = assignments.get("drive")
-        if isinstance(d_data, dict): d_intent = d_data.get("ros", False)
-        a_data = assignments.get("arm")
-        if isinstance(a_data, dict): a_intent = a_data.get("ros", False)
-
         display_menu = list(self.menu)
-        display_menu[2] = f"{'Stop' if d_intent else 'Start'} DRIVE ROS Node"
-        display_menu[3] = f"{'Stop' if a_intent else 'Start'} ARM ROS Node"
+        display_menu[2] = f"{'Stop' if d_ros_active else 'Start'} DRIVE ROS Node"
+        display_menu[3] = f"{'Stop' if a_ros_active else 'Start'} ARM ROS Node"
 
         for i, item in enumerate(display_menu):
             if i == self.selection: stdscr.attron(curses.A_REVERSE)
@@ -223,8 +222,6 @@ class ControllerUI:
             if self.joy_manager.is_arm_running():
                 self.ros_manager.disable_arm()
                 self.joy_manager.stop_arm()
-
-        self.ros_manager.publish_status(self.drive, self.arm)
 
     def popup_select(self, stdscr, title, assign, role, exclude_controller=None):
         sel = 0
@@ -327,9 +324,17 @@ class ControllerUI:
 
         # Initialize ROS once at startup
         self.ros_manager.start()
+        
+        # Auto-refresh tracking
+        last_refresh = time.time()
 
         try:
             while True:
+                # Auto-refresh after delay
+                if time.time() - last_refresh >= AUTO_REFRESH_DELAY:
+                    self.refresh_controllers()
+                    last_refresh = time.time()
+                
                 self.draw(stdscr)
                 key = stdscr.getch()
                 btn = None

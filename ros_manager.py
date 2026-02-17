@@ -91,26 +91,3 @@ class RosManager:
         self._kill_process(self.arm_process)
         self.arm_process = None
         self.arm_active = False
-
-    # ==================== STATUS ====================
-
-    def get_topic_status(self, topic_name):
-        """Check if drive/arm is active based on our process"""
-        if topic_name == "/buswala":
-            return self.drive_active
-        elif topic_name == "/aram":
-            return self.drive_active
-        return False
-
-    def publish_status(self, drive, arm):
-        """No-op - not needed for simple mode"""
-        pass
-
-    def get_drive_mode(self):
-        return "Manual"
-
-    def get_arm_mode(self):
-        return "Manual"
-
-    def get_arm_state(self):
-        return "Manual"
