@@ -38,3 +38,7 @@ python3 ros_menu.py
 1. Select a controller for DRIVE
 2. Select a controller for ARM
 3. Toggle ROS → starts joy_node, then runs `ros2 run <package> <node>`
+
+
+
+To setup auto start go to launcher.sh in pi and set the correct directory
