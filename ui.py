@@ -224,9 +224,9 @@ class ControllerUI:
                 self.joy_manager.stop_arm()
 
     def popup_select(self, stdscr, title, assign, role, exclude_controller=None):
-        sel = 0
         # Scan controllers once when popup opens
         self.controllers = ControllerStore.find_joysticks()
+        sel = 0  # Will be corrected below after computing available_indices
         while True:
             assignments = ControllerStore.load_assignments()
             
@@ -248,6 +248,10 @@ class ControllerUI:
                 if dev_id in global_in_use_ids:
                     continue
                 available_indices.append(i)
+            
+            # Ensure sel is valid - set to first available if not in available list
+            if sel not in available_indices and available_indices:
+                sel = available_indices[0]
             
             stdscr.clear()
             h, w = stdscr.getmaxyx()
@@ -309,7 +313,7 @@ class ControllerUI:
                 break
             elif key in (ord('r'), ord('R')) or btn == "SOBUJ":
                 self.controllers = ControllerStore.find_joysticks()
-                sel = available_indices[0] if available_indices else 0
+                sel = 0  # Will be corrected to first available on next iteration
             elif key in (ord('b'), ord('B')) or btn == "RED":
                 break
 
