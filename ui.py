@@ -1,114 +1,33 @@
 import curses
-import time
-import statistics
 from controller_store import ControllerStore
 from joy_manager import JoyManager
 from ros_manager import RosManager
 
-
-AUTO_REFRESH_DELAY = 1.0
-
-
-HARDWARE_BUTTONS_AVAILABLE = False
-chan = None
-BUTTON_MAP = {
-    "BLUE": 0,
-    "RED": 3600,
-    "YELLOW": 8400,
-    "SOBUJ": 12900,
-    "SHADA": 19000,
+# ====================================================================
+#                    KEY CONFIGURATION SECTION
+# ====================================================================
+KEYS = {
+    "UP":      [curses.KEY_UP, ord('8')],
+    "DOWN":    [curses.KEY_DOWN, ord('2')],
+    "LEFT":    [curses.KEY_LEFT, ord('4')],
+    "RIGHT":   [curses.KEY_RIGHT, ord('6')],
+    "HOME":    [curses.KEY_HOME, ord('7')],
+    "END":     [curses.KEY_END, ord('1')],
+    "PGUP":    [curses.KEY_PPAGE, ord('9')],
+    "PGDN":    [curses.KEY_NPAGE, ord('3')],
+    "SELECT":  [10, 13, ord('5')],
+    "BACK":    [curses.KEY_LEFT, ord('4'), curses.KEY_DC, ord('.')],
+    "REFRESH": [curses.KEY_IC, ord('0')],
+    "QUIT":    [ord('.'), curses.KEY_DC],
 }
 
-# ==============================
-# HIGH PRECISION FAST BUTTON SYSTEM
-# ==============================
+PAGE_JUMP_SIZE = 3
+HELP_TEXT_MAIN  = "8/2:Up/Dn | 7/1:Home/End | 5:Select | 0:Refresh | .:Quit"
+HELP_TEXT_POPUP = "8/2:Nav | 5:Select | 0:Refresh | 4/.:Back"
+# ====================================================================
 
-PRESS_THRESHOLD = 700      # max distance allowed from center
-RELEASE_THRESHOLD = 1200   # hysteresis release distance
-SAMPLE_COUNT = 5           # fast averaging (low latency)
-
-last_button = None
-button_locked = False
-
-
-def read_stable_adc():
-    """Median over several samples to reject outliers."""
-    samples = []
-    for _ in range(7):
-        samples.append(chan.value)
-    return statistics.median(samples)
-
-
-def get_button_from_value(val):
-    """Return closest button if within threshold"""
-    closest = None
-    smallest_diff = float("inf")
-
-    for name, center in BUTTON_MAP.items():
-        diff = abs(val - center)
-        if diff < smallest_diff:
-            smallest_diff = diff
-            closest = name
-
-    if smallest_diff < PRESS_THRESHOLD:
-        return closest
-    return None
-
-
-def read_button():
-    """Ultra-fast, stable, hysteresis protected button read"""
-    global last_button, button_locked
-
-    if not HARDWARE_BUTTONS_AVAILABLE or chan is None:
-        return None
-
-    try:
-        val = read_stable_adc()
-        current = get_button_from_value(val)
-
-        # --- Hysteresis Logic ---
-        if button_locked:
-            target_center = BUTTON_MAP.get(last_button)
-            if target_center is None or abs(val - target_center) > RELEASE_THRESHOLD:
-                button_locked = False
-                last_button = None
-            return None
-
-        if current and current != last_button:
-            last_button = current
-            button_locked = True
-            return current
-
-        return None
-
-    except Exception:
-        return None
-
-try:
-    from adafruit_ads1x15.ads1115 import ADS1115
-    from adafruit_ads1x15.analog_in import AnalogIn
-    import board
-    import busio
-    i2c = busio.I2C(board.SCL, board.SDA)
-    ads = ADS1115(i2c)
-    ads.data_rate = 860  # Max speed
-    chan = AnalogIn(ads, 0)
-    HARDWARE_BUTTONS_AVAILABLE = True
-except Exception:
-    pass
-
-
-def device_uid(dev):
-    """Unique ID based on device_id."""
-    if not dev:
-        return None
-    device_id = dev.get("device_id")
-    if device_id is not None:
-        return f"id:{device_id}"
-    mac = dev.get("mac")
-    if mac and mac != "N/A":
-        return mac
-    return dev.get("path")
+def key_match(key, action):
+    return key in KEYS.get(action, [])
 
 class ControllerUI:
     def __init__(self):
@@ -119,422 +38,346 @@ class ControllerUI:
         self.arm = None
         self.selection = 0
         self.menu = [
-            "Select DRIVE Controller",
-            "Select ARM Controller",
-            "Toggle DRIVE ROS Node",
-            "Toggle ARM ROS Node",
-            "Clear Screen",
-            "Reset Configuration",
-            "Reboot",
-            "EXIT TO TERMINAL"
+            "DRIVE Controller Settings", 
+            "ARM Controller Settings",
+            "Toggle DRIVE Joy Node", 
+            "Toggle ARM Joy Node",
+            "Clear Screen", 
+            "Reset Configuration", 
+            "Exit"
         ]
 
-    def draw(self, stdscr):
-        # 1. Logic / Sync
-        self.refresh_controllers()
-        assignments = ControllerStore.load_assignments()
-        d_data = assignments.get("drive", {})
-        a_data = assignments.get("arm", {})
-        d_ros_active = d_data.get("ros", False) if isinstance(d_data, dict) else False
-        a_ros_active = a_data.get("ros", False) if isinstance(a_data, dict) else False
-
-        # 2. Render
-        stdscr.erase()
-        h, w = stdscr.getmaxyx()
-        
+    def _render_header(self, stdscr, w):
         stdscr.addstr(1, 2, "ROS CONTROLLER CONFIGURATION", curses.A_BOLD | curses.color_pair(4))
         status_text = "[ROS2 OK]" if self.ros_manager.available else "[ROS2 N/A]"
         status_color = curses.color_pair(2) if self.ros_manager.available else curses.color_pair(1)
         stdscr.addstr(1, 35, status_text, status_color)
 
-        # DRIVE Info
-        y = 3
-        stdscr.addstr(y, 2, "DRIVE", curses.A_BOLD | curses.color_pair(3))
-        if self.drive:
-            owner = self.drive.get("owner", "Unknown") or "Unknown"
-            try:
-                stdscr.addstr(y + 1, 4, f"[P] {owner}", curses.color_pair(2) | curses.A_BOLD)
-                stdscr.addstr(y + 2, 4, f"MAC: {self.drive['mac'][:w-10]}", curses.color_pair(4))
-            except curses.error: pass
-        else:
-            stdscr.addstr(y + 1, 4, "Not selected", curses.color_pair(1))
+    def _render_role_info(self, stdscr, role_name, controller, y, is_active):
+        stdscr.addstr(y, 2, role_name, curses.A_BOLD | curses.color_pair(3))
         
-        d_ros = "* ACTIVE" if d_ros_active else "o INACTIVE"
-        try: stdscr.addstr(y + 3, 4, f"ROS: {d_ros}", curses.color_pair(2 if d_ros_active else 1))
-        except curses.error: pass
-
-        # ARM Info
-        y = 8
-        stdscr.addstr(y, 2, "ARM", curses.A_BOLD | curses.color_pair(3))
-        if self.arm:
-            owner = self.arm.get("owner", "Unknown") or "Unknown"
-            try:
-                stdscr.addstr(y + 1, 4, f"[P] {owner}", curses.color_pair(2) | curses.A_BOLD)
-                stdscr.addstr(y + 2, 4, f"MAC: {self.arm['mac'][:w-10]}", curses.color_pair(4))
-            except curses.error: pass
+        # Check if deselected
+        assignments = ControllerStore.load_assignments()
+        is_deselected = assignments.get(role_name.lower(), {}).get("deselected", False)
+        
+        if controller:
+            owner = controller.get("owner")
+            name = controller.get("name", "Unknown")
+            display = owner if owner else name
+            stdscr.addstr(y + 1, 4, f"{display}", curses.color_pair(2) | curses.A_BOLD)
+            stdscr.addstr(y + 2, 4, f"{name[:30]}", curses.A_DIM)
+        elif is_deselected:
+            stdscr.addstr(y + 1, 4, "DESELECTED", curses.color_pair(1))
         else:
-            stdscr.addstr(y + 1, 4, "Not selected", curses.color_pair(1))
+            stdscr.addstr(y + 1, 4, "No Controller", curses.color_pair(1))
+        
+        status = "* RUNNING" if is_active else "o STOPPED"
+        stdscr.addstr(y + 3, 4, f"Joy: {status}", curses.color_pair(2 if is_active else 1))
 
-        a_ros = "* ACTIVE" if a_ros_active else "o INACTIVE"
-        try: stdscr.addstr(y + 3, 4, f"ROS: {a_ros}", curses.color_pair(2 if a_ros_active else 1))
-        except curses.error: pass
+    def draw(self, stdscr):
+        self.refresh_controllers()
+        h, w = stdscr.getmaxyx()
+        stdscr.erase()
+        
+        self._render_header(stdscr, w)
+        self._render_role_info(stdscr, "DRIVE", self.drive, 3, self.joy_manager.drive_process is not None)
+        self._render_role_info(stdscr, "ARM", self.arm, 9, self.joy_manager.arm_process is not None)
 
-        # MENU
-        y = 13
-        display_menu = list(self.menu)
-        display_menu[2] = f"{'Stop' if d_ros_active else 'Start'} DRIVE ROS Node"
-        display_menu[3] = f"{'Stop' if a_ros_active else 'Start'} ARM ROS Node"
-
-        for i, item in enumerate(display_menu):
+        # Render Menu
+        for i, item in enumerate(self.menu):
+            label = item
+            if i == 2: label = f"{'Stop' if self.joy_manager.drive_process else 'Start'} DRIVE Node"
+            if i == 3: label = f"{'Stop' if self.joy_manager.arm_process else 'Start'} ARM Node"
+            
             if i == self.selection: stdscr.attron(curses.A_REVERSE)
-            if y + i < h - 1: stdscr.addstr(y + i, 2, f" {item} ")
-            if i == self.selection: stdscr.attroff(curses.A_REVERSE)
+            stdscr.addstr(15 + i, 2, f" {label} ")
+            stdscr.attroff(curses.A_REVERSE)
 
-        try: stdscr.addstr(h - 2, 0, "Navigate(↑↓/BLUE,3) Select(Ent/SHADA) Refresh(R/SOBUJ) Quit(Q/RED)".center(w)[:w-1], curses.A_REVERSE)
-        except curses.error: pass
+        stdscr.addstr(h - 2, 0, HELP_TEXT_MAIN.center(w)[:w-1], curses.A_REVERSE)
         stdscr.refresh()
 
     def refresh_controllers(self):
-        """Load saved assignments - no scanning"""
-        assignments = ControllerStore.load_assignments()
-
-        # Load DRIVE from saved assignment
-        drive_data = assignments.get("drive", {})
-        if isinstance(drive_data, dict) and drive_data.get("device_id") is not None:
-            self.drive = drive_data
-        else:
-            self.drive = None
-
-        # Load ARM from saved assignment
-        arm_data = assignments.get("arm", {})
-        if isinstance(arm_data, dict) and arm_data.get("device_id") is not None:
-            self.arm = arm_data
-        else:
-            self.arm = None
-
-        # Enforce lifecycle
-        if not (drive_data and drive_data.get("ros", False)):
-            if self.joy_manager.is_drive_running():
-                self.ros_manager.disable_drive()
-                self.joy_manager.stop_drive()
-
-        if not (arm_data and arm_data.get("ros", False)):
-            if self.joy_manager.is_arm_running():
-                self.ros_manager.disable_arm()
-                self.joy_manager.stop_arm()
-
-    def popup_select(self, stdscr, title, assign, role, exclude_controller=None):
-        # Scan controllers once when popup opens
+        """Refresh hardware state and auto-assign controllers based on their paths."""
         self.controllers = ControllerStore.find_joysticks()
-        sel = 0  # Will be corrected below after computing available_indices
-        while True:
-            assignments = ControllerStore.load_assignments()
+        assignments = ControllerStore.load_assignments()
+        
+        # Auto-assign controllers based on which path they're connected to
+        for role in ["drive", "arm"]:
+            # Check if a controller is connected to this role's specific path
+            controller = ControllerStore.find_controller_for_role(role)
             
-            current_ctrl = getattr(self, role, None)
-            current_uid = device_uid(current_ctrl)
-            global_in_use_ids = set()
-            for key, val in assignments.items():
-                dev_id = None
-                if isinstance(val, dict):
-                    dev_id = val.get("device_id")
-                if dev_id is not None and (current_ctrl is None or dev_id != current_ctrl.get("device_id")):
-                    global_in_use_ids.add(dev_id)
-
-            available_indices = []
-            for i, d in enumerate(self.controllers):
-                dev_id = d.get("device_id")
-                if exclude_controller and dev_id == exclude_controller.get("device_id"):
-                    continue
-                if dev_id in global_in_use_ids:
-                    continue
-                available_indices.append(i)
-            
-            # Ensure sel is valid - set to first available if not in available list
-            if sel not in available_indices and available_indices:
-                sel = available_indices[0]
-            
-            stdscr.clear()
-            h, w = stdscr.getmaxyx()
-            stdscr.addstr(2, 4, title, curses.A_BOLD | curses.color_pair(4))
-
-            if not self.controllers:
-                stdscr.addstr(4, 6, "No controllers found.", curses.color_pair(1))
+            if controller:
+                # Controller found on this role's path - auto-assign if not manually deselected
+                current_data = assignments.get(role, {})
+                if not current_data.get("deselected", False):
+                    # Auto-assign this controller
+                    setattr(self, role, controller)
+                    assignments[role] = {"mac": controller["mac"], "path": controller["path"]}
+                else:
+                    # User manually deselected - don't auto-assign
+                    setattr(self, role, None)
             else:
-                for i, d in enumerate(self.controllers):
-                    dev_id = d.get("device_id")
-                    mac = d.get("mac")
-                    is_unavailable = (
-                        (exclude_controller and dev_id == exclude_controller.get("device_id"))
-                        or (dev_id in global_in_use_ids)
-                    )
-                    owner = d.get("owner")
-                    line1 = f"[{dev_id}] {owner} ({d['name']})" if owner else f"[{dev_id}] {d['name']}"
-                    if is_unavailable: line1 = f"[X] {line1} [IN USE]"
-                    mac_display = mac[:30] if mac else "N/A"
-                    line2 = f"  Path: {d['path']}  MAC: {mac_display}"
-                    row = 4 + (i * 3)
+                # No controller on this path
+                setattr(self, role, None)
+                # Clear assignment if controller disconnected
+                if role in assignments:
+                    del assignments[role]
+        
+        ControllerStore.save_assignments(assignments)
+
+    def _handle_navigation(self, key, current_sel, max_val, available_indices=None):
+        indices = available_indices if available_indices is not None else list(range(max_val))
+        if not indices: return current_sel
+
+        curr_idx = indices.index(current_sel) if current_sel in indices else 0
+        if key_match(key, "UP"): return indices[(curr_idx - 1) % len(indices)]
+        if key_match(key, "DOWN"): return indices[(curr_idx + 1) % len(indices)]
+        if key_match(key, "HOME"): return indices[0]
+        if key_match(key, "END"): return indices[-1]
+        if key_match(key, "PGUP"): return indices[max(0, curr_idx - PAGE_JUMP_SIZE)]
+        if key_match(key, "PGDN"): return indices[min(len(indices) - 1, curr_idx + PAGE_JUMP_SIZE)]
+        return current_sel
+
+    def popup_select(self, stdscr, title, role, exclude=None):
+        """
+        Shows controller status for a specific role with deselect option.
+        Controllers are auto-assigned based on path, but user can deselect.
+        """
+        need_redraw = True
+        sel = 0  # 0 = controller info, 1 = deselect option
+        
+        stdscr.timeout(200) 
+
+        while True:
+            # Scan for controller on this role's specific path
+            controller = ControllerStore.find_controller_for_role(role)
+            assignments = ControllerStore.load_assignments()
+            is_deselected = assignments.get(role, {}).get("deselected", False)
+            
+            if need_redraw:
+                stdscr.erase()
+                h, w = stdscr.getmaxyx()
+                stdscr.addstr(2, 4, title, curses.A_BOLD | curses.color_pair(4))
+                
+                from controller_store import ROLE_PATHS
+                expected_path = ROLE_PATHS.get(role, "Unknown")
+                stdscr.addstr(4, 4, f"Scanning: {expected_path}", curses.A_DIM)
+                
+                if controller:
+                    # Show controller info
+                    stdscr.addstr(6, 4, "Controller Found:", curses.color_pair(2) | curses.A_BOLD)
                     
-                    if is_unavailable:
-                        stdscr.addstr(row, 6, line1[:w-8], curses.color_pair(1))
-                        stdscr.addstr(row + 1, 6, line2[:w-8], curses.color_pair(1))
+                    name = controller.get("name", "Unknown")
+                    owner = controller.get("owner")
+                    mac = controller.get("mac", "N/A")
+                    path = controller.get("path", "N/A")
+                    
+                    if owner:
+                        stdscr.addstr(8, 6, f"Owner: {owner}", curses.A_BOLD)
+                    stdscr.addstr(9, 6, f"Name:  {name}")
+                    stdscr.addstr(10, 6, f"MAC:   {mac[:24]}")
+                    stdscr.addstr(11, 6, f"Path:  {path}")
+                    
+                    if is_deselected:
+                        stdscr.addstr(13, 6, "Status: DESELECTED (Manual Override)", curses.color_pair(1))
                     else:
-                        if i == sel: stdscr.attron(curses.A_REVERSE)
-                        stdscr.addstr(row, 6, line1[:w-8])
-                        if i == sel: stdscr.attroff(curses.A_REVERSE)
-                        stdscr.addstr(row + 1, 6, line2[:w-8], curses.color_pair(4))
+                        stdscr.addstr(13, 6, "Status: AUTO-ASSIGNED", curses.color_pair(2))
+                    
+                    # Options
+                    options = ["Re-select (Use this controller)", "Deselect (Ignore this controller)"] if is_deselected else ["Deselect (Ignore this controller)"]
+                    
+                    for i, opt in enumerate(options):
+                        row = 16 + i
+                        if i == sel:
+                            stdscr.attron(curses.A_REVERSE)
+                        stdscr.addstr(row, 6, f" {opt} ")
+                        stdscr.attroff(curses.A_REVERSE)
+                else:
+                    stdscr.addstr(6, 4, "No Controller Connected", curses.color_pair(1) | curses.A_BOLD)
+                    stdscr.addstr(8, 6, f"Plug a controller into cable {expected_path.split('/')[-1]}")
+                    
+                    # If was deselected, offer to re-enable auto-assign
+                    if is_deselected:
+                        stdscr.addstr(10, 6, "Auto-assign is disabled for this role.", curses.A_DIM)
+                        if sel == 0:
+                            stdscr.attron(curses.A_REVERSE)
+                        stdscr.addstr(12, 6, " Re-enable Auto-assign ")
+                        stdscr.attroff(curses.A_REVERSE)
 
-            stdscr.addstr(h - 2, 4, "↑↓ Navigate  ENTER Select  R/SOBUJ Refresh  B/RED Back", curses.A_REVERSE)
-            stdscr.refresh()
-
+                stdscr.addstr(h - 2, 4, "5:Select | 4/.:Back", curses.A_REVERSE)
+                stdscr.refresh()
+                need_redraw = False
+            
             key = stdscr.getch()
-            btn = None
-            if HARDWARE_BUTTONS_AVAILABLE: btn = read_button()
-            if key == -1 and btn is None: continue
+            if key == -1:
+                # Check if state changed (controller plugged/unplugged)
+                new_controller = ControllerStore.find_controller_for_role(role)
+                if (new_controller is None) != (controller is None):
+                    need_redraw = True
+                    sel = 0
+                continue
+            
+            if key_match(key, "UP") or key_match(key, "DOWN"):
+                if controller and is_deselected:
+                    sel = 1 - sel  # Toggle between 0 and 1
+                need_redraw = True
+            elif key_match(key, "SELECT"):
+                if controller:
+                    if is_deselected:
+                        if sel == 0:
+                            # Re-select: remove deselected flag
+                            assignments[role] = {"mac": controller["mac"], "path": controller["path"]}
+                            ControllerStore.save_assignments(assignments)
+                        else:
+                            # Keep deselected (do nothing, just exit)
+                            pass
+                    else:
+                        # Deselect: set flag
+                        assignments[role] = {"deselected": True}
+                        ControllerStore.save_assignments(assignments)
+                else:
+                    # No controller - if deselected, re-enable auto-assign
+                    if is_deselected:
+                        if role in assignments:
+                            del assignments[role]
+                        ControllerStore.save_assignments(assignments)
+                break
+            elif key_match(key, "REFRESH"):
+                need_redraw = True
+            elif key_match(key, "BACK") or key_match(key, "QUIT"):
+                break
+    
+    def confirm_reset(self, stdscr):
+        """Dedicated sub-menu for confirming configuration reset without flickering."""
+        c_sel = 1 # Default to 'Cancel'
+        options = ["CONFIRM RESET (Wipe All Data)", "CANCEL (Keep Settings)"]
+        need_redraw = True
+        stdscr.timeout(200)
+        
+        while True:
+            if need_redraw:
+                stdscr.erase()
+                stdscr.addstr(4, 4, "⚠️  RESET CONFIGURATION?", curses.A_BOLD | curses.color_pair(1))
+                stdscr.addstr(6, 4, "This will disconnect all controllers and stop ROS nodes.")
+                
+                for i, opt in enumerate(options):
+                    if i == c_sel: stdscr.attron(curses.A_REVERSE)
+                    stdscr.addstr(9 + i, 6, f" {opt} ")
+                    stdscr.attroff(curses.A_REVERSE)
+                
+                stdscr.refresh()
+                need_redraw = False
+            
+            key = stdscr.getch()
+            if key == -1: continue
+            
+            if key_match(key, "UP") or key_match(key, "DOWN"):
+                c_sel = 1 - c_sel # Toggle selection
+                need_redraw = True
+            elif key_match(key, "SELECT"):
+                if c_sel == 0:
+                    ControllerStore.save_assignments({})
+                    self._show_message(stdscr, "Success", "Configuration has been wiped.")
+                    return True
+                return False
+            elif key_match(key, "BACK") or key_match(key, "QUIT"):
+                return False
 
-            if (key == curses.KEY_UP or btn == "BLUE") and available_indices:
-                current_pos = available_indices.index(sel) if sel in available_indices else 0
-                new_pos = (current_pos - 1) % len(available_indices)
-                sel = available_indices[new_pos]
-            elif (key == curses.KEY_DOWN or btn == "YELLOW") and available_indices:
-                current_pos = available_indices.index(sel) if sel in available_indices else 0
-                new_pos = (current_pos + 1) % len(available_indices)
-                sel = available_indices[new_pos]
-            elif (key in (10, 13) or btn == "SHADA") and available_indices and sel in available_indices:
-                chosen = self.controllers[sel]
-                assign(chosen)
-                assignments = ControllerStore.load_assignments()
-                assignments[role] = {
-                    "device_id": chosen.get("device_id"),
-                    "name": chosen.get("name"),
-                    "mac": chosen.get("mac"),
-                    "ros": False
-                }
-                ControllerStore.save_assignments(assignments)
-                break
-            elif key in (ord('r'), ord('R')) or btn == "SOBUJ":
-                self.controllers = ControllerStore.find_joysticks()
-                sel = 0  # Will be corrected to first available on next iteration
-            elif key in (ord('b'), ord('B')) or btn == "RED":
-                break
+    def confirm_exit(self, stdscr):
+        """Dedicated sub-menu for confirming exit without flickering."""
+        c_sel = 1 # Default to 'Cancel'
+        options = ["CONFIRM EXIT (Shutdown)", "CANCEL (Stay in Menu)"]
+        need_redraw = True
+        stdscr.timeout(200)
+        
+        while True:
+            if need_redraw:
+                stdscr.erase()
+                stdscr.addstr(4, 4, "⚠️  EXIT APPLICATION?", curses.A_BOLD | curses.color_pair(1))
+                stdscr.addstr(6, 4, "This will stop all ROS nodes and exit the program.")
+                
+                for i, opt in enumerate(options):
+                    if i == c_sel: stdscr.attron(curses.A_REVERSE)
+                    stdscr.addstr(9 + i, 6, f" {opt} ")
+                    stdscr.attroff(curses.A_REVERSE)
+                
+                stdscr.refresh()
+                need_redraw = False
+            
+            key = stdscr.getch()
+            if key == -1: continue
+            
+            if key_match(key, "UP") or key_match(key, "DOWN"):
+                c_sel = 1 - c_sel # Toggle selection
+                need_redraw = True
+            elif key_match(key, "SELECT"):
+                return c_sel == 0  # True if confirmed
+            elif key_match(key, "BACK") or key_match(key, "QUIT"):
+                return False
+            
+    def _handle_menu_selection(self, stdscr):
+        if self.selection == 0: self.popup_select(stdscr, "DRIVE Controller Settings", "drive", self.arm)
+        elif self.selection == 1: self.popup_select(stdscr, "ARM Controller Settings", "arm", self.drive)
+        elif self.selection in (2, 3):
+            from controller_store import ROLE_PATHS
+            role = "drive" if self.selection == 2 else "arm"
+            path = ROLE_PATHS.get(role)
+            controller = getattr(self, role)
+
+            if not controller:
+                self._show_message(stdscr, "Error", f"No {role.upper()} controller connected.")
+                return False
+
+            start_fn = getattr(self.joy_manager, f"start_{role}")
+            stop_fn = getattr(self.joy_manager, f"stop_{role}")
+            is_running = getattr(self.joy_manager, f"{role}_process") is not None
+
+            if not is_running:
+                # START JOY with fixed path
+                start_fn(path)
+                # ros_manager.enable_drive() # Uncomment when ready
+            else:
+                # STOP JOY
+                # ros_manager.disable_drive() # Uncomment when ready
+                stop_fn()
+        elif self.selection == 4: stdscr.clear(); stdscr.refresh()
+        elif self.selection == 5:
+            self.confirm_reset(stdscr) # Call the manual confirmation menu
+        elif self.selection == 6:
+            if self.confirm_exit(stdscr): return True  # Only exit if confirmed
+        return False
 
     def run(self, stdscr):
         curses.curs_set(0)
         curses.start_color()
-        curses.init_pair(1, curses.COLOR_RED, curses.COLOR_BLACK)
-        curses.init_pair(2, curses.COLOR_GREEN, curses.COLOR_BLACK)
-        curses.init_pair(3, curses.COLOR_CYAN, curses.COLOR_BLACK)
-        curses.init_pair(4, curses.COLOR_YELLOW, curses.COLOR_BLACK)
-        stdscr.timeout(50 if HARDWARE_BUTTONS_AVAILABLE else 500)
-
-        # Initialize ROS once at startup
-        self.ros_manager.start()
+        for i, color in enumerate([curses.COLOR_RED, curses.COLOR_GREEN, curses.COLOR_CYAN, curses.COLOR_YELLOW], 1):
+            curses.init_pair(i, color, curses.COLOR_BLACK)
         
-        # Auto-refresh tracking
-        last_refresh = time.time()
+        stdscr.timeout(100)
+        stdscr.keypad(True)
+        self.ros_manager.start()
 
         try:
             while True:
-                # Auto-refresh after delay
-                if time.time() - last_refresh >= AUTO_REFRESH_DELAY:
-                    self.refresh_controllers()
-                    last_refresh = time.time()
-                
                 self.draw(stdscr)
                 key = stdscr.getch()
-                btn = None
-                if HARDWARE_BUTTONS_AVAILABLE: btn = read_button()
-                if key == -1 and btn is None: continue
-
-                if key == curses.KEY_UP or btn == "BLUE":
-                    self.selection = (self.selection - 1) % len(self.menu)
-                elif key == curses.KEY_DOWN or btn == "YELLOW":
-                    self.selection = (self.selection + 1) % len(self.menu)
-                elif key in (10, 13) or btn == "SHADA":
-                    if self.selection == 0:
-                        self.popup_select(stdscr, "Select DRIVE Controller", lambda d: setattr(self, "drive", d), "drive", self.arm)
-                    elif self.selection == 1:
-                        self.popup_select(stdscr, "Select ARM Controller", lambda d: setattr(self, "arm", d), "arm", self.drive)
-                    elif self.selection == 2:
-                        # Toggle Drive (Safe, Universal)
-                        assignments = ControllerStore.load_assignments()
-                        
-                        drive_data = assignments.get("drive", {})
-                        if not isinstance(drive_data, dict):
-                            drive_data = {}
-                        
-                        if drive_data.get("device_id") is None:
-                            self._show_message(stdscr, "No Controller", "Select DRIVE first.")
-                        else:
-                            current_intent = drive_data.get("ros", False)
-                            new_intent = not current_intent
-                            
-                            drive_data["ros"] = new_intent
-                            assignments["drive"] = drive_data
-                            ControllerStore.save_assignments(assignments)
-                            
-                            if new_intent:
-                                drive_id = drive_data.get("device_id")
-                                if self.joy_manager.start_drive(drive_id):
-                                    self.ros_manager.enable_drive()
-                                else:
-                                    drive_data["ros"] = False
-                                    assignments["drive"] = drive_data
-                                    ControllerStore.save_assignments(assignments)
-                                    self._show_message(stdscr, "Error", "Failed to start DRIVE joy_node.")
-                            else:
-                                self.ros_manager.disable_drive()
-                                self.joy_manager.stop_drive()
-                            self.refresh_controllers()
-
-                    elif self.selection == 3:
-                        # Toggle Arm (Safe, Universal)
-                        assignments = ControllerStore.load_assignments()
-                        
-                        arm_data = assignments.get("arm", {})
-                        if not isinstance(arm_data, dict):
-                            arm_data = {}
-                        
-                        if arm_data.get("device_id") is None:
-                            self._show_message(stdscr, "No Controller", "Select ARM first.")
-                        else:
-                            current_intent = arm_data.get("ros", False)
-                            new_intent = not current_intent
-                            
-                            arm_data["ros"] = new_intent
-                            assignments["arm"] = arm_data
-                            ControllerStore.save_assignments(assignments)
-                            
-                            if new_intent:
-                                arm_id = arm_data.get("device_id")
-                                if self.joy_manager.start_arm(arm_id):
-                                    self.ros_manager.enable_arm()
-                                else:
-                                    arm_data["ros"] = False
-                                    assignments["arm"] = arm_data
-                                    ControllerStore.save_assignments(assignments)
-                                    self._show_message(stdscr, "Error", "Failed to start ARM joy_node.")
-                            else:
-                                self.ros_manager.disable_arm()
-                                self.joy_manager.stop_arm()
-                            self.refresh_controllers()
-                    elif self.selection == 4:
-                        stdscr.clear(); stdscr.refresh()
-                    elif self.selection == 5:
-                        if self._confirm_reset(stdscr):
-                            self.joy_manager.cleanup()
-                            self.ros_manager.disable_drive()
-                            self.ros_manager.disable_arm()
-                            ControllerStore.save_assignments({})
-                            self.drive = None
-                            self.arm = None
-                            self.refresh_controllers()
-                            self._show_message(stdscr, "Success", "Configuration has been reset.")
-                    elif self.selection == 6:
-                        self._confirm_reboot(stdscr)
-                    elif self.selection == 7: 
-                        if(self.terminate(stdscr)): break
-                elif key in (ord('r'), ord('R')) or btn == "SOBUJ":
-                    stdscr.clear()
-                    self.refresh_controllers()
-                elif key in (ord('q'), ord('Q')):
-                    break
+                if key == -1: continue
+                if key_match(key, "QUIT"):
+                    if self.confirm_exit(stdscr):
+                        break
+                if key_match(key, "REFRESH"): self.refresh_controllers()
+                elif key_match(key, "SELECT"):
+                    if self._handle_menu_selection(stdscr): break
+                else: self.selection = self._handle_navigation(key, self.selection, len(self.menu))
         finally:
             self.joy_manager.cleanup()
             self.ros_manager.stop()
-            ControllerStore.save_assignments({}) # Cleanup on exit
+            ControllerStore.save_assignments({})
 
     def _show_message(self, stdscr, title, message):
         stdscr.clear()
         stdscr.addstr(2, 4, title, curses.A_BOLD | curses.color_pair(1))
         stdscr.addstr(4, 4, message)
-        stdscr.addstr(6, 4, "Press any key or SHADA to continue...")
+        stdscr.addstr(6, 4, "Press any key to continue...")
         stdscr.refresh()
-        # Use short timeout to poll both keyboard and hardware buttons
-        stdscr.timeout(50)
-        while True:
-            key = stdscr.getch()
-            btn = read_button() if HARDWARE_BUTTONS_AVAILABLE else None
-            if key != -1 or btn:
-                break
-            time.sleep(0.05)
-        # Restore normal timeout
-        stdscr.timeout(50 if HARDWARE_BUTTONS_AVAILABLE else 500)
-
-    def _confirm_reset(self, stdscr):
-        """Confirmation dialog for Reset Configuration"""
-        stdscr.clear()
-        stdscr.addstr(2, 4, "RESET CONFIGURATION", curses.A_BOLD | curses.color_pair(1))
-        stdscr.addstr(4, 4, "This will clear all controller assignments.")
-        stdscr.addstr(5, 4, "Are you sure?")
-        stdscr.addstr(7, 4, "[Y/SHADA] Confirm    [N/RED] Cancel", curses.color_pair(4))
-        stdscr.refresh()
-        # Use short timeout to poll both keyboard and hardware buttons
-        stdscr.timeout(50)
-        while True:
-            key = stdscr.getch()
-            btn = read_button() if HARDWARE_BUTTONS_AVAILABLE else None
-            if key in (ord('y'), ord('Y')) or btn == "SHADA":
-                # Restore timeout before returning
-                stdscr.timeout(50 if HARDWARE_BUTTONS_AVAILABLE else 500)
-                return True
-            elif key in (ord('n'), ord('N'), 27) or btn == "RED" or key != -1:
-                # ESC, N, RED, or any other key cancels
-                stdscr.timeout(50 if HARDWARE_BUTTONS_AVAILABLE else 500)
-                return False
-            time.sleep(0.05)
-
-    def _confirm_reboot(self, stdscr):
-        """Confirmation dialog for System Reboot"""
-        import os
-        stdscr.clear()
-        stdscr.addstr(2, 4, "REBOOT SYSTEM", curses.A_BOLD | curses.color_pair(1))
-        stdscr.addstr(4, 4, "The system will reboot immediately.")
-        stdscr.addstr(5, 4, "Are you sure?")
-        stdscr.addstr(7, 4, "[Y/SHADA] Confirm    [N/RED] Cancel", curses.color_pair(4))
-        stdscr.refresh()
-        # Use short timeout to poll both keyboard and hardware buttons
-        stdscr.timeout(50)
-        while True:
-            key = stdscr.getch()
-            btn = read_button() if HARDWARE_BUTTONS_AVAILABLE else None
-            if key in (ord('y'), ord('Y')) or btn == "SHADA":
-                stdscr.clear()
-                stdscr.addstr(4, 4, "Rebooting...", curses.A_BOLD | curses.color_pair(2))
-                stdscr.refresh()
-                self.joy_manager.cleanup()
-                self.ros_manager.stop()
-                ControllerStore.save_assignments({})
-                time.sleep(0.5)
-                os.system("sudo reboot")
-                return
-            elif key in (ord('n'), ord('N'), 27) or btn == "RED" or key != -1:
-                # ESC, N, RED, or any other key cancels
-                stdscr.timeout(50 if HARDWARE_BUTTONS_AVAILABLE else 500)
-                return
-    def terminate(self, stdscr):
-        """Confirmation dialog for System Reboot"""
-        import os
-        stdscr.clear()
-        stdscr.addstr(2, 4, "TERMINATE SYSTEM", curses.A_BOLD | curses.color_pair(1))
-        stdscr.addstr(4, 4, "The Terminal will terminate immediately.")
-        stdscr.addstr(5, 4, "Are you sure?")
-        stdscr.addstr(7, 4, "[Y/SHADA] Confirm    [N/RED] Cancel", curses.color_pair(4))
-        stdscr.refresh()
-        # Use short timeout to poll both keyboard and hardware buttons
-        stdscr.timeout(50)
-        while True:
-            key = stdscr.getch()
-            btn = read_button() if HARDWARE_BUTTONS_AVAILABLE else None
-            if key in (ord('y'), ord('Y')) or btn == "SHADA":
-                stdscr.clear()
-                stdscr.addstr(4, 4, "Terminating...", curses.A_BOLD | curses.color_pair(2))
-                stdscr.refresh()
-                self.joy_manager.cleanup()
-                self.ros_manager.stop()
-                ControllerStore.save_assignments({})
-                time.sleep(0.5)
-                return True
-            elif key in (ord('n'), ord('N'), 27) or btn == "RED" or key != -1:
-                # ESC, N, RED, or any other key cancels
-                stdscr.timeout(50 if HARDWARE_BUTTONS_AVAILABLE else 500)
-                return False
+        stdscr.getch()
