@@ -63,9 +63,10 @@ class ControllerUI:
         if controller:
             owner = controller.get("owner")
             name = controller.get("name", "Unknown")
+            mac = controller.get("mac", "N/A")
             display = owner if owner else name
             stdscr.addstr(y + 1, 4, f"{display}", curses.color_pair(2) | curses.A_BOLD)
-            stdscr.addstr(y + 2, 4, f"{name[:30]}", curses.A_DIM)
+            stdscr.addstr(y + 2, 4, f"{name[:30]}  |  {mac[:24]}", curses.A_DIM)
         elif is_deselected:
             stdscr.addstr(y + 1, 4, "DESELECTED", curses.color_pair(1))
         else:
@@ -81,7 +82,7 @@ class ControllerUI:
         
         self._render_header(stdscr, w)
         self._render_role_info(stdscr, "DRIVE", self.drive, 3, self.joy_manager.drive_process is not None)
-        self._render_role_info(stdscr, "ARM", self.arm, 9, self.joy_manager.arm_process is not None)
+        self._render_role_info(stdscr, "ARM", self.arm, 10, self.joy_manager.arm_process is not None)
 
         # Render Menu
         for i, item in enumerate(self.menu):
@@ -90,7 +91,7 @@ class ControllerUI:
             if i == 3: label = f"{'Stop' if self.joy_manager.arm_process else 'Start'} ARM Node"
             
             if i == self.selection: stdscr.attron(curses.A_REVERSE)
-            stdscr.addstr(15 + i, 2, f" {label} ")
+            stdscr.addstr(16 + i, 2, f" {label} ")
             stdscr.attroff(curses.A_REVERSE)
 
         stdscr.addstr(h - 2, 0, HELP_TEXT_MAIN.center(w)[:w-1], curses.A_REVERSE)
@@ -101,25 +102,18 @@ class ControllerUI:
         self.controllers = ControllerStore.find_joysticks()
         assignments = ControllerStore.load_assignments()
         
-        # Auto-assign controllers based on which path they're connected to
         for role in ["drive", "arm"]:
-            # Check if a controller is connected to this role's specific path
             controller = ControllerStore.find_controller_for_role(role)
             
             if controller:
-                # Controller found on this role's path - auto-assign if not manually deselected
                 current_data = assignments.get(role, {})
                 if not current_data.get("deselected", False):
-                    # Auto-assign this controller
                     setattr(self, role, controller)
                     assignments[role] = {"mac": controller["mac"], "path": controller["path"]}
                 else:
-                    # User manually deselected - don't auto-assign
                     setattr(self, role, None)
             else:
-                # No controller on this path
                 setattr(self, role, None)
-                # Clear assignment if controller disconnected
                 if role in assignments:
                     del assignments[role]
         
@@ -322,23 +316,14 @@ class ControllerUI:
             from controller_store import ROLE_PATHS
             role = "drive" if self.selection == 2 else "arm"
             path = ROLE_PATHS.get(role)
-            controller = getattr(self, role)
-
-            if not controller:
-                self._show_message(stdscr, "Error", f"No {role.upper()} controller connected.")
-                return False
 
             start_fn = getattr(self.joy_manager, f"start_{role}")
             stop_fn = getattr(self.joy_manager, f"stop_{role}")
             is_running = getattr(self.joy_manager, f"{role}_process") is not None
 
             if not is_running:
-                # START JOY with fixed path
                 start_fn(path)
-                # ros_manager.enable_drive() # Uncomment when ready
             else:
-                # STOP JOY
-                # ros_manager.disable_drive() # Uncomment when ready
                 stop_fn()
         elif self.selection == 4: stdscr.clear(); stdscr.refresh()
         elif self.selection == 5:
@@ -356,6 +341,11 @@ class ControllerUI:
         stdscr.timeout(100)
         stdscr.keypad(True)
         self.ros_manager.start()
+
+        # Auto-start joy nodes on fixed paths unconditionally
+        from controller_store import ROLE_PATHS
+        self.joy_manager.start_drive(ROLE_PATHS.get("drive"))
+        self.joy_manager.start_arm(ROLE_PATHS.get("arm"))
 
         try:
             while True:
