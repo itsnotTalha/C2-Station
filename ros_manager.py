@@ -2,16 +2,23 @@ import subprocess
 import signal
 import os
 import threading
-from rclpy.node import Node
-import rclpy
+import time
 
-ROS2_AVAILABLE = True
+ROS2_AVAILABLE = False
+Node = object  # Fallback base class
+
 try:
     import rclpy
+    from rclpy.node import Node as RclpyNode
+    from geometry_msgs.msg import Twist
+    from std_msgs.msg import String
+    ROS2_AVAILABLE = True
+    Node = RclpyNode
 except ImportError:
-    ROS2_AVAILABLE = False
+    pass
 
-class RosManager:
+
+class RosManager(Node):
 
     def __init__(self):
         self.ros_initialized = False
@@ -19,12 +26,59 @@ class RosManager:
         self.drive_process = None
         self.arm_process = None
 
+        # Telemetry Data
+        self.linear_vel = 0.0
+        self.angular_vel = 0.0
+        self.steering_mode = "Standby"
+        
+        # FIX: Default to Autonomous instead of Disconnected
+        self.drive_mode = "Autonomous" 
+        
+        # Subscription Management
+        self.is_subscribed = False
+        self._node_initialized = False
+
     def start(self):
         if not self.available: return False
         if not self.ros_initialized:
-            rclpy.init()
+            try:
+                rclpy.init()
+            except Exception:
+                pass  # Already initialized
+            
+            # Initialize the Node parent class now that rclpy is initialized
+            if not self._node_initialized:
+                super().__init__('ui_telemetry_node')
+                self._node_initialized = True
+            
             self.ros_initialized = True
+
+            # Subscribe immediately — indicator_topic is one-shot, can't afford to wait
+            self.create_subscription(Twist, 'cmd_vel', self._twist_cb, 10)
+            self.create_subscription(String, 'indicator', self._mode_cb, 10)
+            self.is_subscribed = True
+
+            # Start background spin
+            self.spin_thread = threading.Thread(target=lambda: rclpy.spin(self), daemon=True)
+            self.spin_thread.start()
         return True
+
+    def _twist_cb(self, msg):
+        self.linear_vel = msg.linear.x
+        self.angular_vel = msg.angular.z
+        # angular.y = 200.0 → Spot Turn, 404.0 → Normal Mode
+        self.steering_mode = "Spot Turn (360)" if msg.angular.y == 200.0 else "Differential Drive"
+
+    def _mode_cb(self, msg):
+        """
+        Parses the indicator strings: 
+        "Blue -> Manual Mode" or "RED -> Autonomous Mode"
+        """
+        data = msg.data
+        if "Blue" in data:
+            self.drive_mode = "Manual"
+        elif "RED" in data:
+            self.drive_mode = "Autonomous"
 
     def _run_node(self, package, executable):
         """
@@ -79,6 +133,12 @@ class RosManager:
         if self.ros_initialized:
             rclpy.shutdown()
             self.ros_initialized = False
+
+    # def stop(self):
+    #     self.disable_drive()
+    #     self.disable_arm()
+    #     if self.ros_initialized:
+    #         self.destroy_node()
 
     def publish_status(self, drive, arm):
         """No longer used as internal publishing logic is removed."""

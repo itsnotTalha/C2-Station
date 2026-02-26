@@ -3,6 +3,7 @@ from controller_store import ControllerStore
 from joy_manager import JoyManager
 from ros_manager import RosManager
 
+
 # ====================================================================
 #                    KEY CONFIGURATION SECTION
 # ====================================================================
@@ -10,7 +11,6 @@ KEYS = {
     "UP":      [curses.KEY_UP, ord('8')],
     "DOWN":    [curses.KEY_DOWN, ord('2')],
     "LEFT":    [curses.KEY_LEFT, ord('4')],
-    "RIGHT":   [curses.KEY_RIGHT, ord('6')],
     "HOME":    [curses.KEY_HOME, ord('7')],
     "END":     [curses.KEY_END, ord('1')],
     "PGUP":    [curses.KEY_PPAGE, ord('9')],
@@ -18,6 +18,7 @@ KEYS = {
     "SELECT":  [10, 13, ord('5')],
     "BACK":    [curses.KEY_LEFT, ord('4'), curses.KEY_DC, ord('.')],
     "REFRESH": [curses.KEY_IC, ord('0')],
+    "CLEAR":   [ord('6')],
     "QUIT":    [ord('.'), curses.KEY_DC],
 }
 
@@ -82,6 +83,8 @@ class ControllerUI:
         self._render_header(stdscr, w)
         self._render_role_info(stdscr, "DRIVE", self.drive, 3, self.joy_manager.drive_process is not None)
         self._render_role_info(stdscr, "ARM", self.arm, 10, self.joy_manager.arm_process is not None)
+
+        self._render_telemetry(stdscr, w)
 
         # Render Menu
         for i, item in enumerate(self.menu):
@@ -202,6 +205,8 @@ class ControllerUI:
                     if role in assignments: del assignments[role]
                     ControllerStore.save_assignments(assignments)
                 break
+            elif key_match(key, "CLEAR"):
+                stdscr.clear(); stdscr.refresh()
             elif key_match(key, "BACK") or key_match(key, "QUIT"): break
 
     def confirm_reset(self, stdscr):
@@ -275,6 +280,39 @@ class ControllerUI:
         elif self.selection == 6:
             if self.confirm_exit(stdscr): return True
         return False
+    
+    def _render_telemetry(self, stdscr, w):
+        col_x = 60 # Position on the right side of the screen
+        
+        # Header
+        stdscr.addstr(3, col_x, "SYSTEM KINEMATICS & STATE", curses.A_BOLD | curses.color_pair(3))
+        stdscr.addstr(4, col_x, "═" * 30, curses.A_DIM)
+
+        # Dynamic Data
+        def add_stat(row, label, value, color=None):
+            stdscr.addstr(row, col_x, f"{label:<18}:", curses.A_BOLD)
+            if color:
+                stdscr.addstr(row, col_x + 20, str(value), color)
+            else:
+                stdscr.addstr(row, col_x + 20, str(value))
+
+        # Render rows using professional terminology
+        add_stat(6, "Linear Velocity", f"{self.ros_manager.linear_vel:>5.2f} m/s")
+        add_stat(7, "Angular Velocity", f"{self.ros_manager.angular_vel:>5.2f} rad/s")
+        
+        # Color code the Drive Mode
+        if "Manual" in self.ros_manager.drive_mode:
+            mode_color = curses.color_pair(3) # Blue
+        else:
+            mode_color = curses.color_pair(1)
+        add_stat(9, "Drive Mode", self.ros_manager.drive_mode, mode_color)
+        
+        add_stat(10, "Steering Mode", self.ros_manager.steering_mode)
+
+        # Connection status for the telemetry thread
+        status_str = "ACTIVE" if self.ros_manager.is_subscribed else "LISTENING..."
+        status_col = curses.color_pair(2) if self.ros_manager.is_subscribed else curses.color_pair(4)
+        stdscr.addstr(13, col_x, f"Link Status: {status_str}", status_col | curses.A_DIM)
 
     def run(self, stdscr):
         curses.curs_set(0)
