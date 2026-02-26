@@ -161,18 +161,6 @@ ros2 run joy_linux joy_linux_node \
 ### `ros_manager.py` — ROS2 Context Manager (`RosManager`)
 
 Manages the ROS2 Python context (`rclpy`) and higher-level ROS2 drive/arm node processes.
-
-**Responsibilities:**
-- Initializing and shutting down the `rclpy` context
-- Starting/stopping the drive and arm ROS2 nodes as subprocesses (separate from joy nodes)
-- Checking whether those nodes are running via process handle polling
-
-**Note:** The drive and arm node commands in `enable_drive()` / `enable_arm()` are currently stubs (`your_drive_package`, `your_arm_package`). These should be replaced with your actual ROS2 package and executable names.
-
-**Topic status check:** `get_topic_status()` maps topic names to process handles:
-- `/buswala` → drive process
-- `/aram` → arm process
-
 ---
 
 ## ROS2 Nodes & Topics
@@ -233,19 +221,6 @@ User presses "Toggle DRIVE Joy Node"
 
 ## Configuration Reference
 
-### Adding a New Controller Profile
-
-In `controller_store.py`, add an entry to `CONTROLLER_PROFILES`:
-
-```python
-CONTROLLER_PROFILES = {
-    "Xbox-360 Controller": {"buttons": 11, "axes": 8},
-    "PS4 Controller":      {"buttons": 13, "axes": 8},
-    "Logitech X-3D Pro":   {"buttons": 12, "axes": 6},
-    "My New Controller":   {"buttons": 15, "axes": 6},  # ← add here
-}
-```
-
 ### Registering a Controller Owner
 
 In `controller_store.py`, add the Bluetooth MAC address and owner name:
@@ -258,23 +233,7 @@ CONTROLLER_OWNERS = {
 }
 ```
 
-The MAC is read from `/sys/class/input/jsX/device/uniq`. To find it, plug in the controller and run:
-```bash
-cat /sys/class/input/js0/device/uniq
-```
-
-### Changing Role Device Paths
-
-In `controller_store.py`:
-
-```python
-ROLE_PATHS = {
-    "drive": "/dev/input/69",   # ← change to match your udev rule
-    "arm":   "/dev/input/96",   # ← change to match your udev rule
-}
-```
-
-### Wiring in Your Actual ROS2 Nodes
+### Wiring in Your ROS2 Nodes
 
 In `ros_manager.py`, replace the stub commands:
 
