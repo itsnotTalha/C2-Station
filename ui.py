@@ -23,6 +23,9 @@ KEYS = {
     "QUIT":    [ord('.'), curses.KEY_DC],
 }
 
+six_press_start = None
+SIX_HOLD_DURATION = 1.0  # seconds
+
 PAGE_JUMP_SIZE = 3
 HELP_TEXT_MAIN  = "8/2:Up/Dn | 7/1:Home/End | 5:Select | 0:Refresh | .:Quit"
 HELP_TEXT_POPUP = "8/2:Nav | 5:Select | 0:Refresh | 4/.:Back"
@@ -86,6 +89,66 @@ class ControllerUI:
         
         status = "* RUNNING" if is_active else "o STOPPED"
         stdscr.addstr(y + 3, 4, f"Joy: {status}", curses.color_pair(2 if is_active else 1))
+
+    def show_dummy_shutdown(self, stdscr):
+        need_redraw = True
+        stdscr.timeout(200)
+
+        while True:
+            if need_redraw:
+                stdscr.erase()
+                h, w = stdscr.getmaxyx()
+
+                text = "Shutting Down"
+
+                padding_x = 6
+                box_width = len(text) + padding_x
+                box_height = 5
+
+                start_y = (h - box_height) // 2
+                start_x = (w - box_width) // 2
+
+                # Top border
+                stdscr.addstr(start_y, start_x,
+                            "╔" + "═" * (box_width - 2) + "╗",
+                            curses.color_pair(1) | curses.A_BOLD)
+
+                # Middle empty line
+                stdscr.addstr(start_y + 1, start_x,
+                            "║" + " " * (box_width - 2) + "║",
+                            curses.color_pair(1) | curses.A_BOLD)
+
+                # Text line
+                text_x = start_x + (box_width - len(text)) // 2
+                stdscr.addstr(start_y + 2, start_x,
+                            "║" + " " * (box_width - 2) + "║",
+                            curses.color_pair(1) | curses.A_BOLD)
+
+                stdscr.addstr(start_y + 2, text_x,
+                            text,
+                            curses.color_pair(1) | curses.A_BOLD)
+
+                # Bottom empty line
+                stdscr.addstr(start_y + 3, start_x,
+                            "║" + " " * (box_width - 2) + "║",
+                            curses.color_pair(1) | curses.A_BOLD)
+
+                # Bottom border
+                stdscr.addstr(start_y + 4, start_x,
+                            "╚" + "═" * (box_width - 2) + "╝",
+                            curses.color_pair(1) | curses.A_BOLD)
+
+                stdscr.refresh()
+                need_redraw = False
+
+            key = stdscr.getch()
+
+            if key == -1:
+                continue
+
+            elif key_match(key, "BACK") or key_match(key, "QUIT"):
+                return False
+
 
     def _get_progress_status(self, percent):
         """Calculates a wide 20-segment bar synchronized with percentage."""
@@ -399,12 +462,31 @@ class ControllerUI:
             while True:
                 self.draw(stdscr)
                 key = stdscr.getch()
-                if key == -1: continue
+
+                # Detect long press of '6'
+                if key == ord('6'):
+                    if six_press_start is None:
+                        six_press_start = time.time()
+                    elif time.time() - six_press_start >= SIX_HOLD_DURATION:
+                        self.show_dummy_shutdown(stdscr)
+                        six_press_start = None
+                        continue
+                else:
+                    six_press_start = None
+
+                if key == -1:
+                    continue
+
                 if key_match(key, "QUIT"):
-                    if self.confirm_exit(stdscr): break
+                    if self.confirm_exit(stdscr):
+                        break
+                if key_match(key, "REFRESH"):
+                    self.refresh_controllers()
                 elif key_match(key, "SELECT"):
-                    if self._handle_menu_selection(stdscr): break
-                else: self.selection = self._handle_navigation(key, self.selection, len(self.menu))
+                    if self._handle_menu_selection(stdscr):
+                        break
+                else:
+                    self.selection = self._handle_navigation(key, self.selection, len(self.menu))
         finally:
             self.joy_manager.cleanup()
             self.ros_manager.stop()
